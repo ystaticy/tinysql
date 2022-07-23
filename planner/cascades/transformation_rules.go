@@ -1,4 +1,4 @@
-// Copyright 2018 PingCAP, Inc.
+﻿// Copyright 2018 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
 package cascades
 
 import (
+	"fmt"
+
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/expression/aggregation"
 	plannercore "github.com/pingcap/tidb/planner/core"
@@ -490,12 +492,69 @@ func NewRulePushSelDownAggregation() Transformation {
 	return rule
 }
 
+func (r *PushSelDownAggregation) appendChildGroup(curGroupExpr *memo.GroupExpr, childGroup *memo.Group) {
+	curGroupExpr.SetChildren(childGroup)
+}
+
+func (r *PushSelDownAggregation) newSelGroupExpr(root *plannercore.LogicalSelection,
+	exprs []expression.Expression) *memo.GroupExpr {
+	selPlan := plannercore.LogicalSelection{Conditions: exprs}.Init(root.SCtx())
+	return memo.NewGroupExpr(selPlan)
+}
+
+func (r *PushSelDownAggregation) pushDown(aggNode *memo.ExprIter, canBePushed, canNotBePushed []expression.Expression,
+	selPlan *plannercore.LogicalSelection, aggPlan *plannercore.LogicalAggregation) (newExprs []*memo.GroupExpr,
+	eraseOld bool, eraseAll bool, err error) {
+
+	aggChildGroup := aggNode.GetExpr().Children[0]
+	newSelGroupExpr := r.newSelGroupExpr(selPlan, canBePushed)
+	r.appendChildGroup(newSelGroupExpr, aggChildGroup)
+
+	aggGroupExpr := memo.NewGroupExpr(aggPlan)
+	r.appendChildGroup(aggGroupExpr, memo.NewGroupWithSchema(newSelGroupExpr, aggChildGroup.Prop.Schema))
+
+	if len(canNotBePushed) == 0 {
+		return []*memo.GroupExpr{aggGroupExpr}, true, false, nil
+	}
+	remainSelGroupExpr := r.newSelGroupExpr(selPlan, canNotBePushed)
+	r.appendChildGroup(remainSelGroupExpr, memo.NewGroupWithSchema(aggGroupExpr, aggPlan.Schema()))
+
+	return []*memo.GroupExpr{remainSelGroupExpr}, true, false, nil
+}
+
+func (r *PushSelDownAggregation) getConditions(plan *plannercore.LogicalSelection) []expression.Expression {
+	return plan.Conditions
+}
+
 // OnTransform implements Transformation interface.
 // It will transform `sel->agg->x` to `agg->sel->x` or `sel->agg->sel->x`
 // or just keep the selection unchanged.
 func (r *PushSelDownAggregation) OnTransform(old *memo.ExprIter) (newExprs []*memo.GroupExpr, eraseOld bool, eraseAll bool, err error) {
 	// TODO: implement the algo according to the header comment.
-	return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
+
+	rootExpr := old.GetExpr()
+	rootExprEqualPlan, ok := rootExpr.ExprNode.(*plannercore.LogicalSelection)
+	if !ok {
+		return nil, false, false, fmt.Errorf("root node should be LogicalSelection")
+	}
+
+	predicates := r.getConditions(rootExprEqualPlan)
+	if len(predicates) == 0 || len(old.Children) == 0 {
+		return nil, false, false, nil
+	}
+
+	downNode := old.Children[0]
+	downPlan, ok := downNode.GetExpr().ExprNode.(*plannercore.LogicalAggregation)
+	if !ok {
+		return nil, false, false, fmt.Errorf("bottom node should be LogicalAggregation")
+	}
+
+	canNotBePushed, canBePushed := downPlan.SeparatePushOrNot(predicates)
+	if len(canBePushed) == 0 {
+		return nil, false, false, nil
+	}
+
+	return r.pushDown(downNode, canBePushed, canNotBePushed, rootExprEqualPlan, downPlan)
 }
 
 // TransformLimitToTopN transforms Limit+Sort to TopN.
@@ -794,9 +853,59 @@ func (r *MergeAggregationProjection) Match(old *memo.ExprIter) bool {
 	return true
 }
 
+func assertLogicalAggregation(gExpr *memo.GroupExpr) (*plannercore.LogicalAggregation, error) {
+	plan, ok := gExpr.ExprNode.(*plannercore.LogicalAggregation)
+	if !ok {
+		return nil, fmt.Errorf("memo group node should be LogicalAggregation")
+	}
+	return plan, nil
+}
+
+func assertLogicalProjection(gExpr *memo.GroupExpr) (*plannercore.LogicalProjection, error) {
+	plan, ok := gExpr.ExprNode.(*plannercore.LogicalProjection)
+	if !ok {
+		return nil, fmt.Errorf("memo group node should be LogicalProjection")
+	}
+	return plan, nil
+}
+
 // OnTransform implements Transformation interface.
 // It will transform `Aggregation->Projection->X` to `Aggregation->X`.
 func (r *MergeAggregationProjection) OnTransform(old *memo.ExprIter) (newExprs []*memo.GroupExpr, eraseOld bool, eraseAll bool, err error) {
 	// TODO: implement the body according to the header comment.
-	return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
+	rootAggPlan, err := assertLogicalAggregation(old.GetExpr())
+	if err != nil {
+		return nil, false, false, err
+	}
+
+	nextProjNode := old.Children[0].GetExpr()
+	nextProjPlan, err := assertLogicalProjection(nextProjNode)
+	if err != nil {
+		return nil, false, false, err
+	}
+
+	newGroupByItems := make([]expression.Expression, len(rootAggPlan.GroupByItems))
+
+	for i, item := range rootAggPlan.GroupByItems {
+		newGroupByItems[i] = expression.ColumnSubstitute(item, nextProjPlan.Schema(), nextProjPlan.Exprs)
+	}
+
+	newAggFuncs := make([]*aggregation.AggFuncDesc, len(rootAggPlan.AggFuncs))
+	for i, aggFunc := range rootAggPlan.AggFuncs {
+		newAggFuncs[i] = aggFunc.Clone()
+		newArgs := make([]expression.Expression, len(aggFunc.Args))
+		for j, arg := range aggFunc.Args {
+			newArgs[j] = expression.ColumnSubstitute(arg, nextProjPlan.Schema(), nextProjPlan.Exprs)
+		}
+		newAggFuncs[i].Args = newArgs
+	}
+
+	newAggExpr := memo.NewGroupExpr(plannercore.LogicalAggregation{
+		GroupByItems: newGroupByItems,
+		AggFuncs:     newAggFuncs,
+	}.Init(rootAggPlan.SCtx()))
+
+	newAggExpr.SetChildren(nextProjNode.Children...)
+
+	return []*memo.GroupExpr{newAggExpr}, true, false, nil
 }

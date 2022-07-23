@@ -1,4 +1,4 @@
-// Copyright 2016 PingCAP, Inc.
+﻿// Copyright 2016 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -154,6 +154,38 @@ func (e *HashJoinExec) fetchAndBuildHashTable(ctx context.Context) error {
 	// You'll need to store the hash table in `e.rowContainer`
 	// and you can call `newHashRowContainer` in `executor/hash_table.go` to build it.
 	// In this stage you can only assign value for `e.rowContainer` without changing any value of the `HashJoinExec`.
+	innerFieldTypes := e.innerSideExec.base().retFieldTypes
+	innerSideList := chunk.NewList(innerFieldTypes, e.ctx.GetSessionVars().InitChunkSize, e.ctx.GetSessionVars().MaxChunkSize)
+
+	innerSideResult := make([]*chunk.Chunk, 0)
+	for {
+		chk := chunk.NewChunkWithCapacity(e.innerSideExec.base().retFieldTypes, e.ctx.GetSessionVars().MaxChunkSize)
+
+		err := Next(ctx, e.innerSideExec, chk)
+		if err != nil {
+			return err
+		}
+		if chk.NumRows() == 0 {
+			break
+		}
+
+		innerSideResult = append(innerSideResult, chk)
+	}
+
+	innerKeyColIdx := make([]int, len(e.innerKeys))
+	for i := range e.innerKeys {
+		innerKeyColIdx[i] = e.innerKeys[i].Index
+	}
+	hCtx := &hashContext{
+		allTypes:  innerFieldTypes,
+		keyColIdx: innerKeyColIdx,
+	}
+
+	e.rowContainer = newHashRowContainer(e.ctx, int(e.innerSideEstCount), hCtx, innerSideList)
+	for _, chk := range innerSideResult {
+		_ = e.rowContainer.PutChunk(chk)
+	}
+
 	return nil
 }
 
@@ -248,8 +280,38 @@ func (e *HashJoinExec) runJoinWorker(workerID uint, outerKeyColIdx []int) {
 	// and put the `joinResult` into the channel `e.joinResultCh`.
 
 	// You may pay attention to:
-	// 
+	//
 	// - e.closeCh, this is a channel tells that the join can be terminated as soon as possible.
+
+	ok, joinResult := e.getNewJoinResult(workerID)
+	if !ok {
+		return
+	}
+
+	hCtx := &hashContext{
+		allTypes:  e.outerSideExec.base().retFieldTypes,
+		keyColIdx: outerKeyColIdx,
+	}
+
+	selected := make([]bool, 0, chunk.InitialCapacity)
+	for {
+		select {
+		case chk, ok := <-e.outerResultChs[workerID]:
+			if !ok {
+				return
+			}
+
+			ok, joinResult = e.join2Chunk(workerID, chk, hCtx, joinResult, selected)
+			if !ok {
+				return
+			}
+			if joinResult != nil {
+				e.joinResultCh <- joinResult
+			}
+		case <-e.closeCh:
+			return
+		}
+	}
 }
 
 func (e *HashJoinExec) getNewJoinResult(workerID uint) (bool, *hashjoinWorkerResult) {

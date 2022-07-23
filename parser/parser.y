@@ -1,4 +1,4 @@
-%{
+﻿%{
 // Copyright 2013 The ql Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSES/QL-LICENSE file.
@@ -811,6 +811,7 @@ import (
 	InsertValues			"Rest part of INSERT/REPLACE INTO statement"
 	JoinTable 			"join table"
 	JoinType			"join type"
+	JoinSpecification	"join specification"
 	LocationLabelList		"location label name list"
 	LikeEscapeOpt 			"like escape option"
 	LikeTableWithOrWithoutParen	"LIKE table_name or ( LIKE table_name )"
@@ -3809,16 +3810,20 @@ JoinTable:
 	{
 		$$ = &ast.Join{Left: $1.(ast.ResultSetNode), Right: $3.(ast.ResultSetNode), Tp: ast.CrossJoin}
 	}
-	/* Project 2: your code here.
-	 * You can see details about JoinTable in https://dev.mysql.com/doc/refman/8.0/en/join.html
-	 *
-	 * joined_table: {
-         *     table_reference {[INNER | CROSS] JOIN | STRAIGHT_JOIN} table_factor [join_specification]
-         *   | table_reference {LEFT|RIGHT} [OUTER] JOIN table_reference join_specification
-         *   | table_reference NATURAL [INNER | {LEFT|RIGHT} [OUTER]] JOIN table_factor
-         * }
-         *
-	 */
+|	TableRef JoinType OuterOpt "JOIN" TableRef JoinSpecification
+	{
+		$$ = &ast.Join{Left: $1.(ast.ResultSetNode), Right: $5.(ast.ResultSetNode), Tp: $2.(ast.JoinType), On: $6.(*ast.Join).On}
+	}
+|	TableRef CrossOpt TableRef JoinSpecification
+	{
+		$$ = &ast.Join{Left: $1.(ast.ResultSetNode), Right: $3.(ast.ResultSetNode), Tp: ast.CrossJoin, On: $4.(*ast.Join).On}
+	}
+
+JoinSpecification:
+	"ON" Expression
+	{
+		$$ = &ast.Join{On: &ast.OnCondition{Expr: $2}}
+	}
 
 JoinType:
 	"LEFT"
@@ -3837,6 +3842,7 @@ OuterOpt:
 CrossOpt:
 	"JOIN"
 |	"INNER" "JOIN"
+|	"CROSS"	"JOIN"
 
 
 LimitClause:

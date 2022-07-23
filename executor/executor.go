@@ -1,4 +1,4 @@
-// Copyright 2015 PingCAP, Inc.
+﻿// Copyright 2015 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -389,23 +389,35 @@ func (e *SelectionExec) Next(ctx context.Context, req *chunk.Chunk) error {
 			1. the `req` chunk` is full.
 			2. there is no further results from child.
 			3. meets any error.
-	 */
+	*/
 	for {
 		// Fill in the `req` util it is full or the `inputIter` is fully processed.
 		for ; e.inputRow != e.inputIter.End(); e.inputRow = e.inputIter.Next() {
 			// Your code here.
+			if e.selected[e.inputRow.Idx()] == false {
+				continue
+			}
+			if req.IsFull() {
+				return nil
+			}
+			req.AppendRow(e.inputRow)
 		}
 		err := Next(ctx, e.children[0], e.childResult)
 		if err != nil {
 			return err
 		}
+		e.inputRow = e.inputIter.Begin()
 		// no more data.
 		if e.childResult.NumRows() == 0 {
 			return nil
 		}
 		/* Your code here.
 		   Process and filter the child result using `expression.VectorizedFilter`.
-		 */
+		*/
+		e.selected, err = expression.VectorizedFilter(e.ctx, e.filters, e.inputIter, e.selected)
+		if err != nil {
+			return err
+		}
 	}
 }
 

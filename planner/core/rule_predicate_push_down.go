@@ -351,6 +351,46 @@ func (p *LogicalProjection) PredicatePushDown(predicates []expression.Expression
 	return append(remained, canNotBePushed...), child
 }
 
+func (la *LogicalAggregation) canPushDown(schema *expression.Schema, expr expression.Expression) (canPush bool, newExpre expression.Expression) {
+	cols := expression.ExtractColumns(expr)
+	// Empty colsInExpr
+	if len(cols) == 0 {
+		return false, expr
+	}
+	// Check is in schema
+	for _, col := range cols {
+		if !schema.Contains(col) {
+			return false, expr
+		}
+	}
+	return true, expr
+}
+
+func (la *LogicalAggregation) SeparatePushOrNot(predicates []expression.Expression) (notPush, toPush []expression.Expression) {
+	aggCols := expression.NewSchema(la.groupByCols...)
+	// Check length
+	if aggCols.Len() == 0 {
+		return
+	}
+	// Traverse predicates to see whether to push down
+	for _, cond := range predicates {
+		switch cond.(type) {
+		case *expression.ScalarFunction:
+			if can, newExpr := la.canPushDown(aggCols, cond); can {
+				toPush = append(toPush, newExpr)
+			} else {
+				notPush = append(notPush, cond)
+			}
+		case *expression.Constant:
+			toPush = append(toPush, cond)
+			notPush = append(notPush, cond)
+		default:
+			notPush = append(notPush, cond)
+		}
+	}
+	return
+}
+
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.
 // TODO: project 4-1 your code here.
 // Here you need to push the predicates across the aggregation.
@@ -366,7 +406,12 @@ func (p *LogicalProjection) PredicatePushDown(predicates []expression.Expression
 // Hints:
 //   1. predicates need to be discussed in two types: expression.Constant and expression.ScalarFunction
 func (la *LogicalAggregation) PredicatePushDown(predicates []expression.Expression) (ret []expression.Expression, retPlan LogicalPlan) {
-	return predicates, la
+	if len(predicates) == 0 {
+		return la.baseLogicalPlan.PredicatePushDown(predicates)
+	}
+	ret, canBePush := la.SeparatePushOrNot(predicates)
+	la.baseLogicalPlan.PredicatePushDown(canBePush)
+	return ret, la
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.

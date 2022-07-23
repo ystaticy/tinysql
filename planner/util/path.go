@@ -47,6 +47,14 @@ type AccessPath struct {
 	IsDNFCond bool
 }
 
+func (path *AccessPath) ToString() string {
+	if path.IsTablePath {
+		return "PRIMARY_KEY"
+	} else {
+		return path.Index.Name.O
+	}
+}
+
 // SplitAccessCondFromFilters move the necessary filter in the form of index_col = constant to access conditions.
 func (path *AccessPath) SplitAccessCondFromFilters(eqOrInCount int) (access, remained []expression.Expression) {
 	access = make([]expression.Expression, len(path.IdxCols)-eqOrInCount)

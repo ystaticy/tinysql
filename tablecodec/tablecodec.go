@@ -69,6 +69,37 @@ func EncodeRowKeyWithHandle(tableID int64, handle int64) kv.Key {
 	return buf
 }
 
+// decodeKeyPrefix get tableID from prefix
+func decodeKeyPrefix(buf []byte, prefixSep []byte) (tableID int64, err error) {
+	if len(buf) <= prefixLen {
+		return 0, errors.New("too short bytes to decode")
+	}
+
+	decCursorB, decCursorE := 0, tablePrefixLength
+	prefix := buf[decCursorB:decCursorE]
+	if !bytes.Equal(prefix, TablePrefix()) {
+		return 0, errors.New("invalid prefix")
+	}
+
+	decCursorB, decCursorE = decCursorE, decCursorE+idLen
+	_, tableID, err = codec.DecodeInt(buf[decCursorB:decCursorE])
+	if err != nil {
+		return 0, err
+	}
+
+	decCursorB, decCursorE = decCursorE, decCursorE+len(prefixSep)
+	sep := buf[decCursorB:decCursorE]
+	if !bytes.Equal(sep, prefixSep) {
+		return 0, errors.New("invalid prefix sep")
+	}
+
+	return tableID, nil
+}
+
+func decodeTableIDKeyPrefix(buf []byte) (tableID int64, err error) {
+	return decodeKeyPrefix(buf, recordPrefixSep)
+}
+
 // DecodeRecordKey decodes the key and gets the tableID, handle.
 func DecodeRecordKey(key kv.Key) (tableID int64, handle int64, err error) {
 	/* Project 1-2: your code here
@@ -98,7 +129,21 @@ func DecodeRecordKey(key kv.Key) (tableID int64, handle int64, err error) {
 	 *   5. understanding the coding rules is a prerequisite for implementing this function,
 	 *      you can learn it in the projection 1-2 course documentation.
 	 */
-	return
+	if len(key) < RecordRowKeyLen {
+		return 0, 0, errors.New("too short bytes to decode")
+	}
+
+	tableID, err = decodeTableIDKeyPrefix(key)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	_, handle, err = codec.DecodeInt(key[prefixLen:RecordRowKeyLen])
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return tableID, handle, nil
 }
 
 // appendTableIndexPrefix appends table index prefix  "t[tableID]_i".
@@ -116,6 +161,10 @@ func EncodeIndexSeekKey(tableID int64, idxID int64, encodedValue []byte) kv.Key 
 	key = codec.EncodeInt(key, idxID)
 	key = append(key, encodedValue...)
 	return key
+}
+
+func decodeTableIndexKey(buf []byte) (tableID int64, err error) {
+	return decodeKeyPrefix(buf, indexPrefixSep)
 }
 
 // DecodeIndexKeyPrefix decodes the key and gets the tableID, indexID, indexValues.
@@ -148,7 +197,19 @@ func DecodeIndexKeyPrefix(key kv.Key) (tableID int64, indexID int64, indexValues
 	 *   5. understanding the coding rules is a prerequisite for implementing this function,
 	 *      you can learn it in the projection 1-2 course documentation.
 	 */
-	return tableID, indexID, indexValues, nil
+	if len(key) < prefixLen {
+		// if an error occurs, return 0 as tableID, 0 as indexID, nil as indexValues and the error.
+		return 0, 0, nil, errors.New("too short bytes to decode")
+	}
+
+	tableID, err = decodeTableIndexKey(key)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
+	indexValues, indexID, err = codec.DecodeInt(key[prefixLen:])
+
+	return tableID, indexID, indexValues, err
 }
 
 // DecodeIndexKey decodes the key and gets the tableID, indexID, indexValues.

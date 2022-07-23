@@ -1,4 +1,4 @@
-// Copyright 2017 PingCAP, Inc.
+﻿// Copyright 2017 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 package core
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/pingcap/tidb/expression"
@@ -204,6 +205,42 @@ type candidatePath struct {
 	isMatchProp  bool
 }
 
+func (c *candidatePath) ToString() string {
+	return fmt.Sprintf("path:%v, columnSet:%v, isSingleScan:%v, isMatchProp:%v", c.path.ToString(), c.columnSet,
+		c.isSingleScan, c.isMatchProp)
+}
+
+func cmpMatchProp(lmp, rmp bool) int {
+	if lmp && !rmp {
+		return 1
+	}
+	if !lmp && rmp {
+		return -1
+	}
+	return 0
+}
+
+func isSetColTheAccessCondition(lcs, rcs *intsets.Sparse) (int, bool) {
+	lLen, rLen := lcs.Len(), rcs.Len()
+	if lLen < rLen {
+		return -1, lcs.SubsetOf(rcs)
+	}
+	if lLen == rLen {
+		return 0, lcs.SubsetOf(rcs)
+	}
+	return 1, rcs.SubsetOf(lcs)
+}
+
+func cmpIfDoubleScan(lss, rss bool) int {
+	if lss && !rss {
+		return 1
+	}
+	if !lss && rss {
+		return -1
+	}
+	return 0
+}
+
 // compareCandidates is the core of skyline pruning. It compares the two candidate paths on three dimensions:
 // (1): the set of columns that occurred in the access condition,
 // (2): whether or not it matches the physical property
@@ -212,7 +249,30 @@ type candidatePath struct {
 // and there exists one factor that `x` is better than `y`, then `x` is better than `y`.
 func compareCandidates(lhs, rhs *candidatePath) int {
 	// TODO: implement the content according to the header comment.
-	return 0
+	columnSetRes, isSubset := isSetColTheAccessCondition(lhs.columnSet, rhs.columnSet)
+	if !isSubset {
+		return 0
+	}
+
+	matchPropRes := cmpMatchProp(lhs.isMatchProp, rhs.isMatchProp)
+	doubleScanRes := cmpIfDoubleScan(lhs.isSingleScan, rhs.isSingleScan)
+	sum := columnSetRes + matchPropRes + doubleScanRes
+	cmp := 0
+
+	if sum < 0 {
+		if columnSetRes > 0 || matchPropRes > 0 || doubleScanRes > 0 {
+			cmp = 0
+		} else {
+			cmp = -1
+		}
+	} else if sum > 0 {
+		if columnSetRes < 0 || matchPropRes < 0 || doubleScanRes < 0 {
+			cmp = 0
+		} else {
+			cmp = 1
+		}
+	}
+	return cmp
 }
 
 func (ds *DataSource) getTableCandidate(path *util.AccessPath, prop *property.PhysicalProperty) *candidatePath {
@@ -248,6 +308,7 @@ func (ds *DataSource) getIndexCandidate(path *util.AccessPath, prop *property.Ph
 
 // skylinePruning prunes access paths according to different factors. An access path can be pruned only if
 // there exists a path that is not worse than it at all factors and there is at least one better factor.
+// 有比它更好的路径就可以裁剪
 func (ds *DataSource) skylinePruning(prop *property.PhysicalProperty) []*candidatePath {
 	candidates := make([]*candidatePath, 0, 4)
 	for _, path := range ds.possibleAccessPaths {
@@ -274,7 +335,22 @@ func (ds *DataSource) skylinePruning(prop *property.PhysicalProperty) []*candida
 		// TODO: Here is the pruning phase. Will prune the access path which is must worse than others.
 		//       You'll need to implement the content in function `compareCandidates`.
 		//       And use it to prune unnecessary paths.
-		candidates = append(candidates, currentCandidate)
+
+		ignore := false
+
+		for i := len(candidates) - 1; i >= 0; i-- {
+			cmp := compareCandidates(candidates[i], currentCandidate)
+			if cmp > 0 {
+				ignore = true
+				break
+			} else if cmp < 0 {
+				candidates = append(candidates[:i], candidates[i+1:]...)
+			}
+		}
+
+		if !ignore {
+			candidates = append(candidates, currentCandidate)
+		}
 	}
 	return candidates
 }

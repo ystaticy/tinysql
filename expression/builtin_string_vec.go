@@ -1,4 +1,4 @@
-// Copyright 2019 PingCAP, Inc.
+﻿// Copyright 2019 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -88,5 +88,27 @@ func (b *builtinLengthSig) vectorized() bool {
 // See https://dev.mysql.com/doc/refman/5.7/en/string-functions.html
 func (b *builtinLengthSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) error {
 	/* Your code here */
+	n := input.NumRows()
+	buffer, err := b.bufAllocator.get(types.ETString, n)
+	if err != nil {
+		return err
+	}
+
+	defer b.bufAllocator.put(buffer)
+	if err := b.args[0].VecEvalString(b.ctx, input, buffer); err != nil {
+		return err
+	}
+
+	result.ResizeInt64(n, false)
+	result.MergeNulls(buffer)
+
+	resInt64s := result.Int64s()
+	for i := 0; i < n; i++ {
+		if result.IsNull(i) {
+			continue
+		}
+		resInt64s[i] = int64(len(buffer.GetString(i)))
+	}
+
 	return nil
 }
